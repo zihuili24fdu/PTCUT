@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyTorch
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+
+# Logs
+logs/
+*.log
+
+# Checkpoints and results
+checkpoints/
+results/
+outputs/
+experiments/*/checkpoints/
+experiments/*/results/
+
+# Data
+data/
+*.jpg
+*.png
+*.npz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
