@@ -41,7 +41,7 @@ experiments/*/checkpoints/
 experiments/*/results/
 
 # Data
-data/
+# data/
 *.jpg
 *.png
 *.npz
