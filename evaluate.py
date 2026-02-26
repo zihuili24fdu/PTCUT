@@ -86,11 +86,10 @@ class InceptionV3FeatureExtractor(nn.Module):
         x = self.block(x)
         return x.squeeze(-1).squeeze(-1)
 
-def get_inception_model():
+def get_inception_model(device='cuda:0'):
     """Get Inception V3 model for feature extraction"""
     model = InceptionV3FeatureExtractor()
-    if torch.cuda.is_available():
-        model = model.cuda()
+    model = model.to(device)
     return model
 
 def extract_features_from_images(image_paths, model, batch_size=32):
@@ -288,6 +287,8 @@ def main():
                         help='Calculate FID score (requires GPU, slower)')
     parser.add_argument('--fid_batch_size', type=int, default=32,
                         help='Batch size for FID calculation')
+    parser.add_argument('--gpu_ids', type=str, default='0',
+                        help='GPU ids to use (e.g., "0" or "0,1"). Use -1 for CPU')
     args = parser.parse_args()
     
     if args.output_dir is None:
@@ -317,7 +318,16 @@ def main():
     if args.calculate_fid:
         print("\nCalculating FID score...")
         try:
-            model = get_inception_model()
+            # Setup device
+            gpu_id = args.gpu_ids.split(',')[0]
+            if gpu_id == '-1':
+                device = torch.device('cpu')
+                print("Using CPU for FID calculation")
+            else:
+                device = torch.device(f'cuda:{gpu_id}')
+                print(f"Using GPU {gpu_id} for FID calculation")
+            
+            model = get_inception_model(device)
             real_paths = [r['real_path'] for r in results]
             fake_paths = [r['fake_path'] for r in results]
             

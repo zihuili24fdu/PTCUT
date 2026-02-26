@@ -39,7 +39,13 @@ class PtcutDataset(BaseDataset):
         self.B_paths = sorted(make_dataset(self.dir_B, opt.max_dataset_size))
         self.A_size = len(self.A_paths)
         self.B_size = len(self.B_paths)
-        
+
+        # 预构建 filename -> path 字典，O(1) 查找，避免每次 __getitem__ 都线性扫描
+        self.B_dict = {
+            os.path.splitext(os.path.basename(p))[0]: p
+            for p in self.B_paths
+        }
+
         print(f"✅ [PTCUT Dataset] 使用共享裁剪参数的配对数据集")
         print(f"   A路径: {self.dir_A} ({self.A_size} 张图像)")
         print(f"   B路径: {self.dir_B} ({self.B_size} 张图像)")
@@ -58,23 +64,13 @@ class PtcutDataset(BaseDataset):
         """
         A_path = self.A_paths[index % self.A_size]
         
-        # 获取域A图像的文件名（不含扩展名）
+        # O(1) 字典查找配对 B 图像
         A_filename = os.path.splitext(os.path.basename(A_path))[0]
-        
-        # 在域B中查找同名文件
-        B_path = None
-        for B_candidate in self.B_paths:
-            B_filename = os.path.splitext(os.path.basename(B_candidate))[0]
-            if A_filename == B_filename:
-                B_path = B_candidate
-                break
-        
-        # 如果找不到配对文件，使用随机选择作为备选
-        if B_path is None:
-            if self.opt.serial_batches:
-                index_B = index % self.B_size
-            else:
-                index_B = random.randint(0, self.B_size - 1)
+        if A_filename in self.B_dict:
+            B_path = self.B_dict[A_filename]
+        else:
+            # 找不到配对文件时随机回退
+            index_B = index % self.B_size if self.opt.serial_batches else random.randint(0, self.B_size - 1)
             B_path = self.B_paths[index_B]
             
         A_img = Image.open(A_path).convert('RGB')

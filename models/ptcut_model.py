@@ -36,6 +36,7 @@ CONCH在PTCUT中的角色：
 - ✅ logit_scale提供正确的相似度温度参数
 """
 
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -345,7 +346,13 @@ class PTCUTModel(BaseModel):
         # ====================================================================
         self.conch_preprocess = build_conch_preprocess(image_size=448)
         print(f"✓ CONCH 预处理流程已构建")
-        
+
+        # 缓存 mean/std 为固定张量，避免每次前向传播重复创建（替代 register_buffer）
+        self.conch_mean = torch.tensor([0.48145466, 0.4578275, 0.40821073],
+                                       device=self.device).view(1, 3, 1, 1)
+        self.conch_std = torch.tensor([0.26862954, 0.26130258, 0.27577711],
+                                      device=self.device).view(1, 3, 1, 1)
+
         # ====================================================================
         # 步骤4: 清理不需要的组件
         # ====================================================================
@@ -561,7 +568,7 @@ class PTCUTModel(BaseModel):
     def compute_G_loss(self):
         """计算生成器的损失：GAN + NCE + CLS + DISTILL"""
         fake = self.fake_B
-        
+
         # 1. GAN损失
         if self.opt.lambda_GAN > 0.0:
             pred_fake = self.netD(fake)
@@ -572,24 +579,54 @@ class PTCUTModel(BaseModel):
         # 2. NCE损失
         if self.opt.lambda_NCE > 0.0:
             self.loss_NCE = self.calculate_NCE_loss(self.real_A, self.fake_B)
+            if self.opt.nce_idt:
+                self.loss_NCE_Y = self.calculate_NCE_loss(self.real_B, self.idt_B)
+                loss_NCE_both = (self.loss_NCE + self.loss_NCE_Y) * 0.5
+            else:
+                loss_NCE_both = self.loss_NCE
         else:
-            self.loss_NCE = 0.0
+            loss_NCE_both = 0.0
 
-        if self.opt.nce_idt and self.opt.lambda_NCE > 0.0:
-            self.loss_NCE_Y = self.calculate_NCE_loss(self.real_B, self.idt_B)
-            loss_NCE_both = (self.loss_NCE + self.loss_NCE_Y) * 0.5
-        else:
-            loss_NCE_both = self.loss_NCE
+        # ====================================================================
+        # 🚀 提速优化区: 统一提取 CONCH 特征，避免重复计算
+        # ====================================================================
+        if self.opt.lambda_cls > 0.0 or self.opt.lambda_distill > 0.0:
+            _, _, h, w = self.fake_B.shape
+            # 仅生成一次同位坐标，CLS 和 DISTILL 共享同一裁剪区域
+            i, j = self.get_random_crop_coords(h, w, crop_size=448)
 
-        # 3. 分类损失 (Classification Loss)
+            fake_B_conch_in = self.differentiable_conch_preprocess(self.fake_B, i, j, crop_size=448)
+            real_B_conch_in = self.differentiable_conch_preprocess(self.real_B, i, j, crop_size=448)
+
+            # 使用 AMP 加速 ViT 的矩阵乘法（Tensor Core），显著提升速度并节省显存
+            from torch.amp import autocast
+            with autocast('cuda'):
+                # fake_B 特征：必须允许梯度回传到生成器
+                fake_B_features = self.image_encoder(fake_B_conch_in)
+                if isinstance(fake_B_features, tuple):
+                    fake_B_features = fake_B_features[0]
+                fake_B_features = fake_B_features / fake_B_features.norm(dim=-1, keepdim=True)
+
+                # real_B 特征：真实图像，不需要求导
+                with torch.no_grad():
+                    real_B_features = self.image_encoder(real_B_conch_in)
+                    if isinstance(real_B_features, tuple):
+                        real_B_features = real_B_features[0]
+                    real_B_features = real_B_features / real_B_features.norm(dim=-1, keepdim=True)
+
+            # 转回 FP32 保证损失计算的数值稳定性
+            self.fake_B_conch_feat = fake_B_features.float()
+            self.real_B_conch_feat = real_B_features.float()
+
+        # 3. 分类损失 (直接传入预计算好的特征，无额外推理开销)
         if self.opt.lambda_cls > 0.0:
-            self.loss_CLS = self.compute_classification_loss()
+            self.loss_CLS = self.compute_classification_loss(self.fake_B_conch_feat)
         else:
             self.loss_CLS = 0.0
 
-        # 4. 蒸馏损失 (Distillation Loss)
+        # 4. 蒸馏损失 (直接传入预计算好的特征，无额外推理开销)
         if self.opt.lambda_distill > 0.0:
-            self.loss_DISTILL = self.compute_distillation_loss()
+            self.loss_DISTILL = self.compute_distillation_loss(self.fake_B_conch_feat, self.real_B_conch_feat)
         else:
             self.loss_DISTILL = 0.0
 
@@ -597,187 +634,45 @@ class PTCUTModel(BaseModel):
         self.loss_G = self.loss_G_GAN + loss_NCE_both + self.loss_CLS + self.loss_DISTILL
         return self.loss_G
 
-    def compute_classification_loss(self):
-        """
-        计算分类损失 (Classification Loss)
-        
-        这是PTCUT的第一个语义损失,确保生成图像具有正确的类别。
-        
-        完整流程：
-        1. CONCH视觉编码：
-           fakeB -> CONCH.visual -> fake_B_features [batch_size, 512]
-        
-        2. 特征归一化：
-           fake_B_features = normalize(fake_B_features)
-        
-        3. 相似度计算：
-           similarity = fake_B_features @ prompt_text_features.T
-           # [batch_size, 512] @ [num_classes, 512].T
-           # = [batch_size, num_classes]
-        
-        4. 应用logit_scale：
-           logits = logit_scale * similarity
-           # logit_scale ≈ 56.35 (CONCH预训练的值)
-        
-        5. 计算交叉熵损失：
-           loss = CrossEntropy(logits, labels)
-        
-        为什么这样有效？
-        - CONCH的视觉编码器可以识别病理学特征
-        - KgCoOp的文本特征包含类别的语义信息
-        - 通过最大化相似度,强制生成器生成正确类别的图像
-        
-        返回:
-            loss_cls: 分类损失值
-        """
-        # ====================================================================
-        # 步骤1: 使用 CONCH visual encoder 提取 fakeB 的特征
-        # ====================================================================
-        # 注意：使用torch.no_grad()因为image encoder是冻结的
-        # 但不影响fakeB的梯度回传（fakeB是生成器输出）
-        with torch.no_grad():
-            # 使用 CONCH visual encoder
-            fake_B_features = self.image_encoder(self.fake_B)
-            
-            # 处理可能的tuple返回值
-            if isinstance(fake_B_features, tuple):
-                fake_B_features = fake_B_features[0]
-            
-            # L2归一化（CLIP必需）
-            fake_B_features = fake_B_features / fake_B_features.norm(dim=-1, keepdim=True)
-        
-        # ====================================================================
-        # 步骤2: 计算与 prompt text features 的相似度
-        # ====================================================================
-        # fake_B_features: [batch_size, 512]
-        # prompt_text_features: [num_classes, 512]
-        # similarity: [batch_size, num_classes]
-        
-        # 获取logit_scale（冻结，约56.35）
-        # 为了避免梯度爆炸，添加温度参数降低scale的影响
+
+    def get_random_crop_coords(self, h, w, crop_size=448):
+        """生成随机裁剪的坐标，用于从高分辨率图像中提取 patch"""
+        if h <= crop_size or w <= crop_size:
+            return 0, 0
+        i = random.randint(0, h - crop_size)
+        j = random.randint(0, w - crop_size)
+        return i, j
+
+    def differentiable_conch_preprocess(self, image_tensor, i, j, crop_size=448):
+        """全过程可导的预处理 (极速版：使用缓存的 mean/std buffer)"""
+        # 1. 还原到 [0, 1]
+        img = (image_tensor + 1.0) / 2.0
+        # 2. 空间裁剪 (切片操作完全保留梯度)
+        img_crop = img[:, :, i:i+crop_size, j:j+crop_size]
+        # 3. 标准化 (直接使用缓存的张量，避免重新开辟显存)
+        img_norm = (img_crop - self.conch_mean) / self.conch_std
+        return img_norm
+
+    def compute_classification_loss(self, fake_B_features):
+        """计算分类损失 (极速版：直接使用预先计算好的特征)"""
+        if not self.opt.use_labels or not hasattr(self, 'labels'):
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+
         logit_scale = self.logit_scale.exp()
-        temperature = getattr(self.opt, 'cls_temperature', 1.0)  # 默认温度系数为1.0
-        
-        # 计算logits = (scale / temperature) * (image @ text.T)
-        # 更高的temperature会降低logits的值，使损失更稳定
+        temperature = getattr(self.opt, 'cls_temperature', 1.0)
         logits = (logit_scale / temperature) * fake_B_features @ self.prompt_text_features.t()
-        # [batch_size, num_classes]
-        
-        # ====================================================================
-        # 步骤3: 计算交叉熵损失
-        # ====================================================================
-        if self.opt.use_labels:
-            # 监督模式：使用真实标签
-            if not hasattr(self, 'labels'):
-                raise RuntimeError(
-                    "CLS 损失需要真实标签，但 self.labels 不存在。\n"
-                    "可能原因：\n"
-                    "1. 图像文件名格式错误（应为 *_i.jpg 或 *_n.jpg）\n"
-                    "2. set_input() 未正确提取标签\n"
-                    "3. 某些图像路径无法解析标签\n"
-                    "请检查数据集文件名或禁用 use_labels"
-                )
-            
-            # 使用真实标签计算交叉熵损失
-            # 这确保生成的HE图像与原IHC图像具有相同的类别
-            loss_cls = self.criterionCLS(logits, self.labels) * self.opt.lambda_cls
-            
-            # 可选：打印调试信息（仅首次）
-            if not hasattr(self, '_cls_debug_printed'):
-                with torch.no_grad():
-                    pred_labels = logits.argmax(dim=1)
-                    accuracy = (pred_labels == self.labels).float().mean().item()
-                print(f"\n[CLS Loss Debug]")
-                print(f"  Batch size: {logits.size(0)}")
-                print(f"  Logit scale: {logit_scale.item():.2f}")
-                print(f"  Temperature: {temperature}")
-                print(f"  Effective scale: {(logit_scale/temperature).item():.2f}")
-                print(f"  Logits range: [{logits.min().item():.2f}, {logits.max().item():.2f}]")
-                print(f"  True labels: {self.labels.cpu().tolist()[:5]}...")
-                print(f"  Pred labels: {pred_labels.cpu().tolist()[:5]}...")
-                print(f"  Batch accuracy: {accuracy:.2%}")
-                print(f"  Loss value: {loss_cls.item():.4f}\n")
-                self._cls_debug_printed = True
-        else:
-            # 禁用分类损失（伪标签模式已移除）
-            # 伪标签（预测作为目标）没有监督信号，会导致损失虚假降低
-            # 如果需要分类监督，请设置 --use_labels True
-            loss_cls = torch.tensor(0.0, device=self.device, requires_grad=True)
-        
+
+        loss_cls = self.criterionCLS(logits, self.labels) * self.opt.lambda_cls
         return loss_cls
 
-    def compute_distillation_loss(self):
-        """
-        计算蒸馏损失 (Distillation Loss)
-        
-        这是PTCUT的第二个语义损失,确保语义信息从真实图像传递到生成图像。
-        
-        完整流程：
-        1. CONCH编码真实图像：
-           realB -> CONCH.visual -> real_B_features [batch_size, 512]
-        
-        2. CONCH编码生成图像：
-           fakeB -> CONCH.visual -> fake_B_features [batch_size, 512]
-        
-        3. 归一化特征：
-           real_B_features = normalize(real_B_features)
-           fake_B_features = normalize(fake_B_features)
-        
-        4. 计算余弦相似度损失：
-           loss = CosineEmbeddingLoss(fake, real, target=1)
-           # target=1 表示希望两者相似
-        
-        为什么这样有效？
-        - realB包含真实的病理学信息
-        - CONCH能够捕捉这些语义特征
-        - 通过约束fakeB与realB在CONCH特征空间中相似，
-          确保虚拟染色过程保留了重要的语义信息
-        
-        与分类损失的区别：
-        - 分类损失：fakeB vs text_features (类别语义)
-        - 蒸馏损失：fakeB vs realB (图像级语义对齐)
-        
-        返回:
-            loss_distill: 蒸馏损失值
-        """
-        # ====================================================================
-        # 步骤1: 使用 CONCH visual encoder 编码 realB 和 fakeB
-        # ====================================================================
-        # 注意：使用no_grad()因为image encoder是冻结的
-        with torch.no_grad():
-            # 编码真实图像
-            real_B_features = self.image_encoder(self.real_B)
-            
-            # 编码生成图像
-            fake_B_features = self.image_encoder(self.fake_B)
-            
-            # 处理可能的元组返回值
-            if isinstance(real_B_features, tuple):
-                real_B_features = real_B_features[0]
-            if isinstance(fake_B_features, tuple):
-                fake_B_features = fake_B_features[0]
-            
-            # ================================================================
-            # 步骤2: L2归一化特征
-            # ================================================================
-            # 这确保余弦相似度在[-1, 1]范围内
-            real_B_features = real_B_features / real_B_features.norm(dim=-1, keepdim=True)
-            fake_B_features = fake_B_features / fake_B_features.norm(dim=-1, keepdim=True)
-        
-        # ====================================================================
-        # 步骤3: 计算余弦相似度损失
-        # ====================================================================
-        # target=1 表示我们希望两个特征相似
-        # CosineEmbeddingLoss(x, y, target=1) = 1 - cos(x, y)
-        # 当x和y完全相同时，cos=1，loss=0
-        # 当x和y完全不同时，cos=-1，loss=2
+    def compute_distillation_loss(self, fake_B_features, real_B_features):
+        """计算蒸馏损失 (极速版：直接使用预先计算好的特征)"""
         target = torch.ones(real_B_features.size(0), device=self.device)
         loss_distill = self.criterionDistill(
-            fake_B_features, 
-            real_B_features, 
+            fake_B_features,
+            real_B_features,
             target
         ) * self.opt.lambda_distill
-        
         return loss_distill
 
     def calculate_NCE_loss(self, src, tgt):

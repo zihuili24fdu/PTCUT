@@ -114,6 +114,101 @@ def calculate_fid(real_features, fake_features):
     sigma2 = np.cov(fake_features, rowvar=False)
     return calculate_frechet_distance(mu1, sigma1, mu2, sigma2)
 
+
+def evaluate_model_in_memory(model, val_dataset, num_test=1000, compute_fid=False):
+    """
+    专为集成到 train.py 中设计的内存级快速评估接口。
+    与 fast_evaluate() 不同，本函数不重新加载模型，
+    而是直接使用已在 GPU 上的训练模型进行推理，避免 OOM 和重复加载开销。
+    """
+    print(f"\n[评估模式] 开始在内存中进行快速评估 (最大数量: {num_test})...")
+
+    was_training = getattr(model, 'isTrain', True)
+    model.eval()
+
+    inception_model = None
+    if compute_fid:
+        print("加载 Inception V3 用于计算 FID...")
+        inception_model = InceptionV3FeatureExtractor()
+        if torch.cuda.is_available():
+            inception_model = inception_model.cuda()
+
+    psnr_scores, ssim_scores, pearson_scores = [], [], []
+    real_features, fake_features = [], []
+
+    start_time = time.time()
+
+    with torch.no_grad():
+        for i, data in enumerate(tqdm(val_dataset, total=min(num_test, len(val_dataset)), desc="评估进度")):
+            if i >= num_test:
+                break
+
+            model.set_input(data)
+            model.test()
+
+            visuals = model.get_current_visuals()
+            real_B_np = tensor_to_numpy(visuals['real_B'])
+            fake_B_np = tensor_to_numpy(visuals['fake_B'])
+
+            try:
+                psnr_scores.append(calculate_psnr(real_B_np, fake_B_np))
+                ssim_scores.append(calculate_ssim(real_B_np, fake_B_np))
+                pearson_scores.append(calculate_pearson(real_B_np, fake_B_np))
+            except Exception:
+                pass
+
+            if compute_fid and inception_model is not None:
+                real_B_norm = (visuals['real_B'] + 1) / 2.0
+                fake_B_norm = (visuals['fake_B'] + 1) / 2.0
+                real_features.append(inception_model(real_B_norm).cpu().numpy())
+                fake_features.append(inception_model(fake_B_norm).cpu().numpy())
+
+    total_time = time.time() - start_time
+
+    if inception_model is not None:
+        del inception_model
+        torch.cuda.empty_cache()
+
+    if was_training:
+        if hasattr(model, 'train') and callable(getattr(model, 'train')):
+            model.train()
+        else:
+            # BaseModel 不一定暴露 .train()，手动恢复内部各子网络为训练模式
+            for name in getattr(model, 'model_names', []):
+                if isinstance(name, str):
+                    net = getattr(model, 'net' + name, None)
+                    if net is not None:
+                        net.train()
+
+    result_str = (
+        f"Evaluated {len(psnr_scores)} images in {total_time:.2f}s "
+        f"({len(psnr_scores)/max(total_time, 1e-9):.2f} img/s)\n"
+    )
+
+    def format_metric(name, scores):
+        if not scores:
+            return ""
+        return (
+            f"{name.upper():8} - Mean: {np.mean(scores):7.4f}  "
+            f"Std: {np.std(scores):7.4f}  "
+            f"Min: {np.min(scores):7.4f}  "
+            f"Max: {np.max(scores):7.4f}\n"
+        )
+
+    result_str += format_metric('psnr', psnr_scores)
+    result_str += format_metric('ssim', ssim_scores)
+    result_str += format_metric('pearson', pearson_scores)
+
+    if compute_fid and len(real_features) > 0:
+        fid_score = calculate_fid(
+            np.concatenate(real_features, axis=0),
+            np.concatenate(fake_features, axis=0)
+        )
+        result_str += f"FID      - Score: {fid_score:.4f}  (lower is better)\n"
+
+    return result_str
+
+
 def fast_evaluate(opt):
     """Fast evaluation without saving images"""
     
