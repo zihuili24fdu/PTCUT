@@ -23,11 +23,11 @@ cd /home/lzh/myCode/PTCUT
 # ==============================================================================
 # 全局公共配置 
 # ==============================================================================
-DATAROOT="/home/lzh/myCode/virtual_stain_dataset/GNB_registered/patches_1024_4"
+DATAROOT="/home/lzh/myCode/virtual_stain_dataset/GNB_registered/patches_224_all"
 
 # 物理分辨率保持：加载1024，随机裁剪448，保持 0.45um/pixel
-LOAD_SIZE=1024
-CROP_SIZE=448
+LOAD_SIZE=224
+CROP_SIZE=224
 PREPROCESS="crop"
 
 # 网络基础结构
@@ -40,35 +40,35 @@ LR=0.0002
 # ==============================================================================
 case $BASELINE in
     pix2pix)
-        NAME="gnb_baseline_pix2pix_448"
+        NAME="gnb_baseline_pix2pix_224"
         MODEL="pix2pix"
         BATCH_SIZE=2
         N_EPOCHS=80
         N_EPOCHS_DECAY=20
         # Pix2Pix: 使用L1损失和标准GAN损失
-        EXTRA_ARGS="--direction AtoB --lambda_L1 100.0 --gan_mode vanilla"
+        EXTRA_ARGS="--dataset_mode aligned --direction AtoB --lambda_L1 100.0 --gan_mode vanilla --pool_size 0 --display_id -1 --no_html"
         echo "🟢 选择基线: Pix2Pix (有监督翻译，L1+GAN)"
         ;;
         
     cyclegan)
-        NAME="gnb_baseline_cyclegan_448"
+        NAME="gnb_baseline_cyclegan_224"
         MODEL="cycle_gan"
         BATCH_SIZE=2  # CycleGAN有两个生成器和判别器，显存消耗大
         N_EPOCHS=30
         N_EPOCHS_DECAY=10
         # CycleGAN: 循环一致性损失
-        EXTRA_ARGS="--lambda_A 10.0 --lambda_B 10.0 --lambda_identity 0.5"
+        EXTRA_ARGS="--dataset_mode unaligned --lambda_A 10.0 --lambda_B 10.0 --lambda_identity 0.5 --display_id -1 --no_html"
         echo "🟢 选择基线: CycleGAN (无监督循环一致性翻译)"
         ;;
         
     cut)
-        NAME="gnb_baseline_cut_448"
+        NAME="gnb_baseline_cut_224"
         MODEL="cut"
         BATCH_SIZE=2  # CUT单向结构，省显存，可以开到4
         N_EPOCHS=30
         N_EPOCHS_DECAY=10
         # CUT: 对比学习损失
-        EXTRA_ARGS="--nce_idt --lambda_GAN 1.0 --lambda_NCE 1.0"
+        EXTRA_ARGS="--dataset_mode unaligned --nce_idt --lambda_GAN 1.0 --lambda_NCE 1.0 --display_id -1 --no_html"
         echo "🟢 选择基线: CUT (无监督对比学习翻译)"
         ;;
         

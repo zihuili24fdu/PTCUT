@@ -22,6 +22,9 @@ Available models:
 - ptcut: Prompt-Tuned CUT model with CONCH-based classification and distillation losses
 - text_tuned_cut: Text-tuned CUT model with CONCH integration for virtual staining
 - cycle_gan: CycleGAN model
+- pt_cyclegan: Prompt-Tuned CycleGAN model with CONCH-based classification and distillation losses
+- pix2pix: Pix2Pix model
+- pt_pix2pix: Prompt-Tuned Pix2Pix model with CONCH-based classification and distillation losses
 - template: Template model for demonstration
 """
 

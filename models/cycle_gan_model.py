@@ -3,10 +3,6 @@ import itertools
 from util.image_pool import ImagePool
 from .base_model import BaseModel
 from . import networks
-try:
-    from apex import amp
-except ImportError:
-    amp = None  # amp 不可用时设为 None
 
 
 class CycleGANModel(BaseModel):
@@ -140,12 +136,7 @@ class CycleGANModel(BaseModel):
         loss_D_fake = self.criterionGAN(pred_fake, False)
         # Combined loss and calculate gradients
         loss_D = (loss_D_real + loss_D_fake) * 0.5
-        # 混合精度训练支持（如果启用）
-        if getattr(self.opt, 'amp', False) and amp is not None:
-            with amp.scale_loss(loss_D, self.optimizer_D) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            loss_D.backward()
+        loss_D.backward()
         return loss_D
 
     def backward_D_A(self):
@@ -185,12 +176,7 @@ class CycleGANModel(BaseModel):
         self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * lambda_B
         # combined loss and calculate gradients
         self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B
-        # 混合精度训练支持（如果启用）
-        if getattr(self.opt, 'amp', False) and amp is not None:
-            with amp.scale_loss(self.loss_G, self.optimizer_G) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            self.loss_G.backward()
+        self.loss_G.backward()
 
     def data_dependent_initialize(self, data):
         """数据依赖的初始化（CycleGAN不需要特殊初始化）

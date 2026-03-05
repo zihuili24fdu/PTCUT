@@ -67,6 +67,9 @@ if __name__ == '__main__':
         epoch_iter = 0
         visualizer.reset()
 
+        # 同步当前 epoch 到模型，供 cls 渐进式调度使用
+        model.current_epoch = epoch
+
         if hasattr(dataset, 'set_epoch'):  # 仅 DDP DistributedSampler 场景下存在此方法
             dataset.set_epoch(epoch)
         

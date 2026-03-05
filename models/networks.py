@@ -254,6 +254,9 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'unet_256':
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+    elif netG == 'attention_unet_32':
+        # Attention U-Net (5 downsampling levels, 32x32 bottleneck)，用于 PyramidPix2pix
+        net = AttentionUnetGenerator(input_nc, output_nc, 5, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'resnet_cat':
         n_blocks = 8
         net = G_Resnet(input_nc, output_nc, opt.nz, num_downs=2, n_res=n_blocks - 4, ngf=ngf, norm='inst', nl_layer='relu')
@@ -1388,3 +1391,102 @@ class GroupedChannelNorm(nn.Module):
         std = x.std(dim=2, keepdim=True)
         x_norm = (x - mean) / (std + 1e-7)
         return x_norm.view(*shape)
+
+
+# ===========================================================================
+# Attention U-Net (用于 PyramidPix2pix)
+# 来源：BCI/PyramidPix2pix，集成到 PTCUT 以供对比实验
+# 参考：Oktay et al., "Attention U-Net", MIDL 2018
+# ===========================================================================
+
+class AttentionUnetGenerator(nn.Module):
+    """带注意力门控的 U-Net 生成器 (Attention U-Net)
+
+    在 U-Net 的每个跳连接上加入注意力门控，抑制不相关特征。
+    用于 PyramidPix2pix 模型（attention_unet_32，5 级下采样，瓶颈 32×32）。
+    """
+
+    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False):
+        super(AttentionUnetGenerator, self).__init__()
+        # 最内层（普通 UnetSkipConnectionBlock）
+        unet_block = UnetSkipConnectionBlock(
+            ngf * 8, ngf * 8, input_nc=None, submodule=None,
+            norm_layer=norm_layer, innermost=True)
+        # 中间层（带注意力门控）
+        for _ in range(num_downs - 5):
+            unet_block = AttentionUnetSkipConnectionBlock(
+                ngf * 8, ngf * 8, input_nc=None, submodule=unet_block,
+                norm_layer=norm_layer, use_dropout=use_dropout)
+        # 逐步降低通道数
+        unet_block = AttentionUnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+        unet_block = AttentionUnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+        unet_block = AttentionUnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+        # 最外层（普通 UnetSkipConnectionBlock）
+        self.model = UnetSkipConnectionBlock(
+            output_nc, ngf, input_nc=input_nc, submodule=unet_block,
+            outermost=True, norm_layer=norm_layer)
+
+    def forward(self, input):
+        return self.model(input)
+
+
+class AttentionUnetSkipConnectionBlock(nn.Module):
+    """带注意力门控的 U-Net 跳连块
+
+    在解码器跳连特征上施加空间注意力权重，选择性增强与解码器相关的编码器特征。
+    仅用于中间层（非最外层/最内层）。
+    """
+
+    def __init__(self, outer_nc, inner_nc, input_nc=None,
+                 submodule=None, outermost=False, innermost=False,
+                 norm_layer=nn.BatchNorm2d, use_dropout=False):
+        super(AttentionUnetSkipConnectionBlock, self).__init__()
+        self.outermost = outermost
+        self.innermost = innermost
+
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+        if input_nc is None:
+            input_nc = outer_nc
+
+        downconv = nn.Conv2d(input_nc, inner_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+        downrelu = nn.LeakyReLU(0.2, False)
+        downnorm = norm_layer(inner_nc)
+        uprelu   = nn.ReLU(False)
+        upnorm   = norm_layer(outer_nc)
+
+        # 注意力门控子网络
+        self.W     = nn.Sequential(
+            nn.Conv2d(outer_nc, outer_nc, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(outer_nc),
+        )
+        self.theta = nn.Conv2d(outer_nc,     outer_nc, kernel_size=2, stride=2, padding=0, bias=False)
+        self.phi   = nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=1, stride=1, padding=0, bias=True)
+        self.psi   = nn.Conv2d(outer_nc,     1,        kernel_size=1, stride=1, padding=0, bias=True)
+
+        upconv = nn.ConvTranspose2d(inner_nc * 2, outer_nc, kernel_size=4, stride=2, padding=1, bias=use_bias)
+        down   = [downrelu, downconv, downnorm]
+        up     = [uprelu, upconv, upnorm]
+
+        if use_dropout:
+            model = down + [submodule] + up + [nn.Dropout(0.5)]
+        else:
+            model = down + [submodule] + up
+
+        self.model   = nn.Sequential(*model)
+        self.gating  = nn.Sequential(*(down + [submodule]))  # 用于获取门控上下文
+
+    def forward(self, x):
+        input_size  = x.size()
+        theta_x     = self.theta(x)
+        theta_size  = theta_x.size()
+        g           = self.gating(x)
+        phi_g       = F.interpolate(self.phi(g), size=theta_size[2:], mode='bilinear', align_corners=False)
+        frelu       = F.relu(theta_x + phi_g, inplace=False)
+        sigm_psif   = torch.sigmoid(self.psi(frelu))
+        attn        = F.interpolate(sigm_psif, size=input_size[2:], mode='bilinear', align_corners=False)
+        y           = attn.expand_as(x) * x
+        W_y         = self.W(y)
+        return torch.cat([W_y, self.model(x)], 1)

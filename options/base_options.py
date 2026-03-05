@@ -35,7 +35,7 @@ class BaseOptions():
         parser.add_argument('--ngf', type=int, default=64, help='生成器最后一层卷积的通道数')
         parser.add_argument('--ndf', type=int, default=64, help='判别器第一层卷积的通道数')
         parser.add_argument('--netD', type=str, default='basic', choices=['basic', 'n_layers', 'pixel', 'patch', 'tilestylegan2', 'stylegan2'], help='指定判别器结构。basic为70x70 PatchGAN。n_layers可指定判别器层数')
-        parser.add_argument('--netG', type=str, default='resnet_9blocks', choices=['resnet_9blocks', 'resnet_6blocks', 'unet_256', 'unet_128', 'stylegan2', 'smallstylegan2', 'resnet_cat'], help='指定生成器结构')
+        parser.add_argument('--netG', type=str, default='resnet_9blocks', choices=['resnet_9blocks', 'resnet_6blocks', 'unet_256', 'unet_128', 'stylegan2', 'smallstylegan2', 'resnet_cat', 'attention_unet_32'], help='指定生成器结构')
         parser.add_argument('--n_layers_D', type=int, default=3, help='仅当 netD==n_layers 时使用')
         parser.add_argument('--normG', type=str, default='instance', choices=['instance', 'batch', 'none'], help='生成器归一化方式: instance 或 batch')
         parser.add_argument('--normD', type=str, default='instance', choices=['instance', 'batch', 'none'], help='判别器归一化方式: instance 或 batch')

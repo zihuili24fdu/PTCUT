@@ -15,19 +15,19 @@ cd /home/lzh/myCode/PTCUT
 # ==============================================================================
 # 路径与名称配置
 # ==============================================================================
-DATAROOT="/home/lzh/myCode/virtual_stain_dataset/GNB_registered/patches_1024_4"
+DATAROOT="/home/lzh/myCode/virtual_stain_dataset/GNB_registered/patches_224_all"
 CONCH_CHECKPOINT="/home/lzh/myCode/CONCH/checkpoints/conch/pytorch_model.bin"
 PROMPT_FEATURES_PATH="/home/lzh/myCode/KgCoOp/KgCoOp/output/gnb_kgcoop_conch_csc_2class_nodular_vs_composite/prompt_text_features.pth"
 
 # 实验名称 (根据参数自动更新了后缀尺寸)
-NAME="gnb_ptcut_cls0.1_clsD1_distill0_size448"
+NAME="gnb_ptcut_cls0.1_distill10_size224_all_dataset2"
 
 # ==============================================================================
 # 基础超参数
 # ==============================================================================
 # 保持 0.45um/pixel 物理分辨率对齐 CONCH
-LOAD_SIZE=1024
-CROP_SIZE=448
+LOAD_SIZE=224
+CROP_SIZE=224
 PREPROCESS="crop"
 
 BATCH_SIZE=2
@@ -39,10 +39,15 @@ LR=0.0002
 # PTCUT 专有损失权重配置
 # ==============================================================================
 LAMBDA_CLS=0.1      # 1. 生成器分类损失 (基于 CONCH 特征与 Prompt 特征)
-LAMBDA_CLS_D=1      # 2. 判别器分类损失 (AC-GAN 辅助分类器)
-LAMBDA_DISTILL=0  # 3. 知识蒸馏损失 (同位对齐特征对比)
+LAMBDA_DISTILL=10   # 2. 知识衇馏损失 (同位对齐特征对比)
 LAMBDA_GAN=1.0      # 4. 基础 GAN 损失
 LAMBDA_NCE=1.0      # 5. 基础 NCE 结构对比损失
+
+# cls 渐进式调度（改进2）
+# 前 CLS_WARMUP_EPOCHS 个 epoch：cls 权重=0，让 GAN+NCE 先收敛
+# 之后 CLS_RAMPUP_EPOCHS 个 epoch：cls 权重从 0 线性爬坡到 LAMBDA_CLS
+CLS_WARMUP_EPOCHS=10   # warmup 期（epoch 数），建议 = N_EPOCHS * 0.33
+CLS_RAMPUP_EPOCHS=5    # 爬坡期（epoch 数），建议 = N_EPOCHS * 0.17
 
 # ==============================================================================
 # 打印实验信息
@@ -63,8 +68,9 @@ fi
 echo "----------------------------------------------------------------"
 echo "Loss 权重设定:"
 echo "  - GAN: $LAMBDA_GAN | NCE: $LAMBDA_NCE"
-echo "  - CLS(生成器): $LAMBDA_CLS | CLS_D(判别器): $LAMBDA_CLS_D"
+echo "  - CLS(生成器): $LAMBDA_CLS"
 echo "  - DISTILL(蒸馏): $LAMBDA_DISTILL"
+echo "  - CLS 调度: warmup ${CLS_WARMUP_EPOCHS} epochs -> 爬坡 ${CLS_RAMPUP_EPOCHS} epochs -> 满权重"
 echo "================================================================"
 
 # ==============================================================================
@@ -143,8 +149,9 @@ python train.py \
     --lr "$LR" \
     --beta1 0.5 \
     --lambda_cls "$LAMBDA_CLS" \
-    --lambda_cls_d "$LAMBDA_CLS_D" \
     --lambda_distill "$LAMBDA_DISTILL" \
+    --cls_warmup_epochs "$CLS_WARMUP_EPOCHS" \
+    --cls_rampup_epochs "$CLS_RAMPUP_EPOCHS" \
     --lambda_GAN "$LAMBDA_GAN" \
     --lambda_NCE "$LAMBDA_NCE" \
     --nce_idt \

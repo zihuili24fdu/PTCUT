@@ -7,19 +7,20 @@
 
 if [ -z "$1" ]; then
     echo "❌ 错误: 未指定基线模型。"
-    echo "💡 用法: bash test_baseline.sh [pix2pix | cyclegan | cut] [gpu_id(可选,默认0)]"
+    echo "💡 用法: bash test_baseline.sh [pix2pix | cyclegan | cut] [gpu_id(可选,默认0)] [epoch(可选,默认latest)]"
     exit 1
 fi
 
 BASELINE=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 GPU_IDS=${2:-0}
+EPOCH=${3:-latest}
 
 cd /home/lzh/myCode/PTCUT
 
 # ==============================================================================
 # 1. 核心评估参数配置区 (在这里修改测试行为)
 # ==============================================================================
-DATAROOT="/home/lzh/myCode/virtual_stain_dataset/GNB_registered/patches_448"
+DATAROOT="/home/lzh/myCode/virtual_stain_dataset/GNB_registered/patches_224_all"
 
 # 测试目标数据集 (可选: test, val, train)
 PHASE="test"
@@ -28,16 +29,24 @@ PHASE="test"
 # - "none": 保持 1024x1024 原图分辨率进行推理和评估
 # - "crop": 裁切到训练时的尺寸 (与训练一致，推荐用于最终测试)
 PREPROCESS="crop"
-LOAD_SIZE=1024
-CROP_SIZE=448
+LOAD_SIZE=224
+CROP_SIZE=224
 
 # 测试数量 (-1 表示测试文件夹下的所有图像)
 NUM_TEST=-1
 
 # ✨ 核心功能开关 (留空表示关闭，填入对应参数表示开启)
 #SAVE_IMAGES="--save_images"   # 是否保存推理生成的图片
-CALC_METRICS="--calc_metrics" # 是否计算 PSNR, SSIM, Pearson
-CALC_FID="--calc_fid"         # 是否计算 FID (比较耗时)
+#CALC_METRICS="--calc_metrics" # 是否计算 PSNR, SSIM, Pearson
+CALC_LPIPS="--calc_lpips"     # 是否计算 LPIPS（感知相似性，越低越好）
+LPIPS_NET="vgg"                # LPIPS 骨干网络: vgg（语义感知更强） 或 alex（更快）
+#CALC_FID="--calc_fid"         # 是否计算 FID （全图 Inception 距离）
+#CALC_KID="--calc_kid"        # 是否计算 KID （内核 Inception 距离，对小样本更鲁棒）
+#CALC_CROP_FID="--calc_crop_fid" # 是否计算 Crop-FID （随机裁切 FID，评估局部质量）
+
+# Crop-FID 裁切参数（仅当 CALC_CROP_FID 开启时生效）
+CROP_FID_SIZE=128  # 裁切尺寸 (px)
+CROP_FID_NUM=8    # 每张图随机裁切数量
 
 # 若不想执行某项功能，将其注释或设为空即可，例如：
 # SAVE_IMAGES=""  # 关闭存图功能，实现极速指标评估
@@ -47,11 +56,11 @@ CALC_FID="--calc_fid"         # 是否计算 FID (比较耗时)
 # ==============================================================================
 case $BASELINE in
     pix2pix)
-        NAME="gnb_baseline_pix2pix_448"
+        NAME="gnb_baseline_pix2pix_224"
         MODEL="pix2pix"
         ;;
     cyclegan)
-        NAME="gnb_baseline_cyclegan_448"
+        NAME="gnb_baseline_cyclegan_224"
         MODEL="cycle_gan"
         ;;
     cut)
@@ -84,10 +93,17 @@ python test.py \
     --load_size "$LOAD_SIZE" \
     --crop_size "$CROP_SIZE" \
     --num_test "$NUM_TEST" \
+    --epoch "$EPOCH" \
     --eval \
     $SAVE_IMAGES \
     $CALC_METRICS \
-    $CALC_FID
+    $CALC_LPIPS \
+    ${CALC_LPIPS:+--lpips_net ${LPIPS_NET}} \
+    $CALC_FID \
+    $CALC_KID \
+    $CALC_CROP_FID \
+    ${CALC_CROP_FID:+--crop_fid_size $CROP_FID_SIZE} \
+    ${CALC_CROP_FID:+--crop_fid_num $CROP_FID_NUM}
 
 echo "================================================================"
 echo "✅ 测试流程执行完毕！"

@@ -1,4 +1,5 @@
 import os.path
+import torch
 from data.base_dataset import BaseDataset, get_params, get_transform
 from data.image_folder import make_dataset
 from PIL import Image
@@ -63,7 +64,7 @@ class PtcutDataset(BaseDataset):
             B_paths (str)    -- image paths
         """
         A_path = self.A_paths[index % self.A_size]
-        
+
         # O(1) 字典查找配对 B 图像
         A_filename = os.path.splitext(os.path.basename(A_path))[0]
         if A_filename in self.B_dict:
@@ -90,7 +91,30 @@ class PtcutDataset(BaseDataset):
         A = A_transform(A_img)
         B = B_transform(B_img)
 
-        return {'A': A, 'B': B, 'A_paths': A_path, 'B_paths': B_path}
+        # 在 DataLoader worker 中预解析标签，避免在模型前向中解析路径字符串
+        A_label = self._parse_label(A_path)
+        B_label = self._parse_label(B_path)
+
+        return {'A': A, 'B': B, 'A_paths': A_path, 'B_paths': B_path,
+                'A_label': A_label, 'B_label': B_label}
+
+    @staticmethod
+    def _parse_label(image_path):
+        """从文件名中解析类别标签，返回 LongTensor scalar。
+
+        支持格式:
+          新格式: *_i.jpg -> 0 (intermixed/composite), *_n.jpg -> 1 (nodular)
+          旧格式: *_1.jpg -> 0, *_2.jpg -> 1, *_3.jpg -> 2, *_4.jpg -> 3
+        """
+        label_map = {
+            'i': 0,  # intermixed / composite
+            'n': 1,  # nodular
+            '1': 0, '2': 1, '3': 2, '4': 3,  # 旧版数字格式
+        }
+        filename = os.path.splitext(os.path.basename(image_path))[0]
+        suffix = filename.split('_')[-1]  # 取最后一个 '_' 后的部分
+        label = label_map.get(suffix, 0)  # 未知后缀默认 0
+        return torch.tensor(label, dtype=torch.long)
 
     def __len__(self):
         """Return the total number of images in the dataset.
